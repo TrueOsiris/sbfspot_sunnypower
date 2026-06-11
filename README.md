@@ -33,7 +33,7 @@ Add the following service definition to your `docker-compose.yml` file:
 
 ```yaml
   sbfspot-influx-sync:
-    image: ghcr.io/trueosiris/sbfspot-sunnypower:latest
+    image: ghcr.io/trueosiris/sbfspot_sunnypower:latest
     container_name: sbfspot-influx-sync
     restart: unless-stopped
     volumes:
