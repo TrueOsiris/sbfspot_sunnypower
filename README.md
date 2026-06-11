@@ -20,7 +20,7 @@ Probably any device consultable via Sunny Explorer or sbfspot should work.
 
 This is the endresult in Grafana & how I load them into homeassistant.
 
-[Grafana](./img/solarpanels_grafana.png)
+![Grafana](./img/solarpanels_grafana.png)
 
 ## 1. Prerequisites
 
