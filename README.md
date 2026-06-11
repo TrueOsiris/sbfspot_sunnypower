@@ -37,7 +37,7 @@ Add the following service definition to your `docker-compose.yml` file:
     container_name: sbfspot-influx-sync
     restart: unless-stopped
     volumes:
-      - ./sbfspot/data:/data:ro
+      - ./sbfspot/data:/data:rw
     environment:
       - TZ=Europe/Brussels
       - CRON_SCHEDULE=0 * * * * # Optional: Change this to alter the frequency (e.g., "*/30 * * * *" for every 30 mins)
@@ -47,6 +47,9 @@ Add the following service definition to your `docker-compose.yml` file:
       - INFLUX_ORG=yourorg
       - INFLUX_DATABASE=solarpanels
 ```
+
+Although we set write access on the .db file, the Python script opens the .db as read only.<br>
+When it was set to read-only on the docker volume, this was the exception: "An error occurred: unable to open database file".<br>
 
 ## 3. Configuration Parameters
 
