@@ -38,8 +38,11 @@ def get_max_timestamp_in_influx(measurement):
                 ts = col[0].as_py()
                 if ts is not None:
                     return int(ts.timestamp()) if hasattr(ts, 'timestamp') else int(ts)
-    except Exception:
-        pass  # Table doesn't exist yet
+    except Exception as e:
+        print(f"\n  [CRITICAL ERROR] Could not read max timestamp for {measurement}!")
+        print(f"  InfluxDB responded with: {e}\n")
+        # Return an impossible future timestamp so we safely skip importing
+        return 9999999999 
     return None
 
 
