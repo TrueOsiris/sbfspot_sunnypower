@@ -43,20 +43,19 @@ def get_max_timestamp_in_influx(measurement):
               |> range(start: 1970-01-01T00:00:00Z, stop: now())
               |> filter(fn: (r) => r._measurement == "{alias}")
               |> group(columns: ["_measurement"])
-              |> max()
+              |> sort(columns: ["_time"], desc: true)
+              |> limit(n: 1)
             """
             result = query_api.query(org=INFLUX_ORG, query=query)
 
             if result:
                 for table in result:
                     for record in table.records:
-                        if record.values.get("_value") is not None:
-                            # Convert back to Unix timestamp
-                            ts = record.values.get("_time")
-                            if ts:
-                                if alias != measurement:
-                                    print(f"Using legacy measurement name {alias} for {measurement}.")
-                                return int(ts.timestamp())
+                        ts = record.get_time() or record.values.get("_time")
+                        if ts:
+                            if alias != measurement:
+                                print(f"Using legacy measurement name {alias} for {measurement}.")
+                            return int(ts.timestamp())
         return None
     except Exception as e:
         status = getattr(e, "status", None)
