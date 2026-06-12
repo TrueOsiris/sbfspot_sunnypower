@@ -27,28 +27,42 @@ client = InfluxDBClient(url=INFLUX_URL, token=INFLUX_TOKEN, org=INFLUX_ORG)
 write_api = client.write_api(write_options=SYNCHRONOUS)
 query_api = client.query_api()
 
+MEASUREMENT_ALIASES = {
+    "sbfspot_day": ["sbfspot_day", "DayData"],
+    "sbfspot_month": ["sbfspot_month", "MonthData"],
+    "sbfspot_spot": ["sbfspot_spot", "SpotData"],
+}
+
 def get_max_timestamp_in_influx(measurement):
     """Query InfluxDB to find the maximum timestamp for a measurement."""
     try:
-        query = f"""
-        from(bucket: "{INFLUX_DATABASE}")
-          |> range(start: 1970-01-01T00:00:00Z, stop: now())
-          |> filter(fn: (r) => r._measurement == "{measurement}")
-          |> group(columns: ["_measurement"])
-          |> max()
-        """
-        result = query_api.query(org=INFLUX_ORG, query=query)
-        
-        if result:
-            for table in result:
-                for record in table.records:
-                    if record.values.get("_value") is not None:
-                        # Convert back to Unix timestamp
-                        ts = record.values.get("_time")
-                        if ts:
-                            return int(ts.timestamp())
+        aliases = MEASUREMENT_ALIASES.get(measurement, [measurement])
+        for alias in aliases:
+            query = f"""
+            from(bucket: "{INFLUX_DATABASE}")
+              |> range(start: 1970-01-01T00:00:00Z, stop: now())
+              |> filter(fn: (r) => r._measurement == "{alias}")
+              |> group(columns: ["_measurement"])
+              |> max()
+            """
+            result = query_api.query(org=INFLUX_ORG, query=query)
+
+            if result:
+                for table in result:
+                    for record in table.records:
+                        if record.values.get("_value") is not None:
+                            # Convert back to Unix timestamp
+                            ts = record.values.get("_time")
+                            if ts:
+                                if alias != measurement:
+                                    print(f"Using legacy measurement name {alias} for {measurement}.")
+                                return int(ts.timestamp())
         return None
     except Exception as e:
+        status = getattr(e, "status", None)
+        reason = getattr(e, "reason", "")
+        if status == 404 or "Not found" in str(e) or reason == "Not Found":
+            return None
         print(f"Warning: Could not query max timestamp for {measurement}: {e}")
         return None
 
@@ -122,14 +136,17 @@ def delete_measurement(measurement):
     try:
         from influxdb_client.client.delete_api import DeleteApi
         delete_api = DeleteApi(client)
-        delete_api.delete(
-            org=INFLUX_ORG,
-            bucket=INFLUX_DATABASE,
-            start_time=datetime(1970, 1, 1, tzinfo=pytz.UTC),
-            stop_time=datetime.now(pytz.UTC),
-            predicate=f'_measurement="{measurement}"'
-        )
-        print(f"Deleted all data for measurement: {measurement}")
+        deleted = []
+        for alias in MEASUREMENT_ALIASES.get(measurement, [measurement]):
+            delete_api.delete(
+                org=INFLUX_ORG,
+                bucket=INFLUX_DATABASE,
+                start_time=datetime(1970, 1, 1, tzinfo=pytz.UTC),
+                stop_time=datetime.now(pytz.UTC),
+                predicate=f'_measurement="{alias}"'
+            )
+            deleted.append(alias)
+        print(f"Deleted all data for measurement(s): {', '.join(deleted)}")
     except Exception as e:
         print(f"Error deleting {measurement}: {e}")
 
