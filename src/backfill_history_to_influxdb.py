@@ -124,6 +124,7 @@ if __name__ == "__main__":
         # Only print the final summary block if actual work was done across any table
         if total_imported > 0:
             print(f"Total new records backfilled across all tables: {total_imported}")
+        else:
             if not full_reimport:
                 print("\nUsage Help:")
                 print("  python backfill_history_to_influxdb.py                  # Incremental (default)")
