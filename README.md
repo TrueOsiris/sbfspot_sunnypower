@@ -32,9 +32,8 @@ This is the endresult in Grafana & how I load them into homeassistant.
 Add the following service definition to your `docker-compose.yml` file:
 
 ```yaml
-  sbfspot-influx-sync:
+  sbfspot_sp:
     image: ghcr.io/trueosiris/sbfspot_sunnypower:latest
-    container_name: sbfspot-influx-sync
     restart: unless-stopped
     volumes:
       - ./sbfspot/data:/data:rw
@@ -52,6 +51,22 @@ Add the following service definition to your `docker-compose.yml` file:
 
 Although we set write access on the .db file, the Python script opens the .db as read only.<br>
 When it was set to read-only on the docker volume, this was the exception: "An error occurred: unable to open database file".<br>
+
+### One-off maintenance runs
+
+If you want to trigger a single import from the host without starting the container's normal cron loop, override the entrypoint and call the script directly:
+
+```bash
+python3 /app/src/backfill_history_to_influxdb.py --full-reimport
+python3 /app/src/backfill_history_to_influxdb.py --cleanup
+```
+
+The equivalent host-side Docker Compose commands are:
+
+```bash
+docker compose run --rm --entrypoint python3 sbfspot_sp /app/src/backfill_history_to_influxdb.py --full-reimport
+docker compose run --rm --entrypoint python3 sbfspot_sp /app/src/backfill_history_to_influxdb.py --cleanup
+```
 
 ## 3. Configuration Parameters
 
