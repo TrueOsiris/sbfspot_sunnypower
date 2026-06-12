@@ -3,7 +3,6 @@
 
 import os
 import sqlite3
-import requests
 from influxdb_client_3 import InfluxDBClient3, Point
 from datetime import datetime, timezone
 import sys
@@ -21,17 +20,13 @@ if not INFLUX_TOKEN:
     print("Example: INFLUX_TOKEN=apiv3_your_token_here")
     sys.exit(1)
 
-# InfluxDB v3 client: SQL queries & deletes, line protocol writes
+# InfluxDB v3 client: SQL queries & line protocol writes
 client = InfluxDBClient3(
     host=INFLUX_URL,
     token=INFLUX_TOKEN,
     database=INFLUX_DATABASE,
     org=INFLUX_ORG
 )
-
-# In InfluxDB v3 (IOx), each measurement is a table.
-# Only the sbfspot_* names are actually written by this importer.
-MEASUREMENTS = ["sbfspot_day", "sbfspot_month", "sbfspot_spot"]
 
 def get_max_timestamp_in_influx(measurement):
     """Return the latest Unix timestamp already stored for this measurement, or None."""
@@ -47,41 +42,6 @@ def get_max_timestamp_in_influx(measurement):
         pass  # Table doesn't exist yet
     return None
 
-def delete_imported_tables():
-    """Drop the imported measurement tables.
-    InfluxDB v3 (IOx) does not support SQL DELETE, so we use DROP TABLE.
-    Falls back to the v2 HTTP delete endpoint if DROP TABLE is also unsupported.
-    """
-    print(f"Dropping imported tables from database '{INFLUX_DATABASE}'...")
-    for table in MEASUREMENTS:
-        try:
-            client.query(f'DROP TABLE IF EXISTS "{table}"', language="sql")
-            print(f"  Dropped: {table}")
-        except Exception as e:
-            print(f"  DROP TABLE failed for {table} ({e}), trying HTTP delete...")
-            try:
-                resp = requests.post(
-                    f"{INFLUX_URL}/api/v2/delete",
-                    headers={
-                        "Authorization": f"Token {INFLUX_TOKEN}",
-                        "Content-Type": "application/json"
-                    },
-                    json={
-                        "start": "1970-01-01T00:00:00Z",
-                        "stop":  "2100-01-01T00:00:00Z",
-                        "predicate": f'_measurement="{table}"'
-                    },
-                    params={"org": INFLUX_ORG, "bucket": INFLUX_DATABASE},
-                    timeout=30
-                )
-                if resp.ok:
-                    print(f"  Cleared via HTTP delete: {table}")
-                else:
-                    print(f"  HTTP delete also failed for {table}: {resp.status_code} {resp.text}")
-                    print(f"  You may need to manually delete '{table}' via the InfluxDB UI.")
-            except Exception as e2:
-                print(f"  HTTP delete error for {table}: {e2}")
-    print("Done.")
 
 def import_table(table_name, measurement, fields, skip_new=False):
     print(f"\n--- {table_name} -> {measurement} ---")
@@ -140,13 +100,10 @@ def import_table(table_name, measurement, fields, skip_new=False):
 if __name__ == "__main__":
     try:
         full_reimport = "--full-reimport" in sys.argv
-        cleanup = "--cleanup" in sys.argv
 
-        if cleanup or full_reimport:
-            mode = "CLEANUP" if cleanup else "FULL REIMPORT"
-            print(f"=== {mode}: Wiping imported tables before reimport ===")
-            delete_imported_tables()
-            print("\nReimporting all data...")
+        if full_reimport:
+            print("=== FULL REIMPORT MODE ===")
+            print("Importing all rows from SQLite without filtering.\n")
             skip_new = False
         else:
             print("=== INCREMENTAL MODE ===")
@@ -166,8 +123,7 @@ if __name__ == "__main__":
         print("\nCompleted successfully.")
         print("\nUsage:")
         print("  python backfill_history_to_influxdb.py                  # Incremental (new records only, skips empty tables)")
-        print("  python backfill_history_to_influxdb.py --full-reimport  # Wipe tables & reimport all")
-        print("  python backfill_history_to_influxdb.py --cleanup        # Same as --full-reimport")
+        print("  python backfill_history_to_influxdb.py --full-reimport  # Import all SQLite rows (no delete/wipe)")
     except Exception as e:
         print(f"\nError: {e}")
         import traceback
