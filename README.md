@@ -43,10 +43,12 @@ Add the following service definition to your `docker-compose.yml` file:
       - CRON_SCHEDULE=0 * * * * # Optional: Change this to alter the frequency (e.g., "*/30 * * * *" for every 30 mins)
       - SQLITE_DB=/data/sbfspot.db
       - INFLUX_URL=http://10.10.0.6:8181
-      - INFLUX_TOKEN=apiv3_...
-      - INFLUX_ORG=yourorg
+      - INFLUX_TOKEN=apiv3_your_token_here # MANDATORY: Generate this in InfluxDB v3
+      - INFLUX_ORG=defaultorg
       - INFLUX_DATABASE=solarpanels
 ```
+
+**⚠️ Important:** `INFLUX_TOKEN` is **mandatory** and must be set. Generate a new API token in your InfluxDB instance.
 
 Although we set write access on the .db file, the Python script opens the .db as read only.<br>
 When it was set to read-only on the docker volume, this was the exception: "An error occurred: unable to open database file".<br>
@@ -59,8 +61,8 @@ The container's behavior is fully controlled via environment variables:
 * `CRON_SCHEDULE`: The frequency of the data sync using standard cron syntax (Default: `0 * * * *` for hourly).
 * `SQLITE_DB`: The internal path to the mounted sbfspot database.
 * `INFLUX_URL`: The full HTTP/HTTPS URL and port to your InfluxDB v3 server.
-* `INFLUX_TOKEN`: Your InfluxDB v3 API authentication token.
-* `INFLUX_ORG`: Your InfluxDB organization name.
+* `INFLUX_TOKEN`: **[MANDATORY]** Your InfluxDB v3 API authentication token (must start with `apiv3_`). Generate this in your InfluxDB console.
+* `INFLUX_ORG`: Your InfluxDB organization name (Default: `defaultorg`).
 * `INFLUX_DATABASE`: The target bucket or database name for the solar metrics.
 
 ## 4. How it Works
