@@ -3,6 +3,7 @@
 
 import os
 import sqlite3
+import requests
 from influxdb_client_3 import InfluxDBClient3, Point
 from datetime import datetime, timezone
 import sys
@@ -28,42 +29,59 @@ client = InfluxDBClient3(
     org=INFLUX_ORG
 )
 
-# In InfluxDB v3, each measurement is stored as a table.
-# We check both import-assigned names and raw SQLite table names (legacy).
-MEASUREMENTS = {
-    "sbfspot_day":   ["sbfspot_day", "DayData"],
-    "sbfspot_month": ["sbfspot_month", "MonthData"],
-    "sbfspot_spot":  ["sbfspot_spot", "SpotData"],
-}
+# In InfluxDB v3 (IOx), each measurement is a table.
+# Only the sbfspot_* names are actually written by this importer.
+MEASUREMENTS = ["sbfspot_day", "sbfspot_month", "sbfspot_spot"]
 
 def get_max_timestamp_in_influx(measurement):
     """Return the latest Unix timestamp already stored for this measurement, or None."""
-    for alias in MEASUREMENTS.get(measurement, [measurement]):
-        try:
-            result = client.query(f'SELECT max(time) AS max_time FROM "{alias}"', language="sql")
-            if result and result.num_rows > 0:
-                col = result.column("max_time")
-                if col and len(col) > 0:
-                    ts = col[0].as_py()
-                    if ts is not None:
-                        if hasattr(ts, 'timestamp'):
-                            return int(ts.timestamp())
-                        return int(ts)
-        except Exception:
-            pass  # Table doesn't exist yet, try next alias
+    try:
+        result = client.query(f'SELECT max(time) AS max_time FROM "{measurement}"', language="sql")
+        if result and result.num_rows > 0:
+            col = result.column("max_time")
+            if col and len(col) > 0:
+                ts = col[0].as_py()
+                if ts is not None:
+                    return int(ts.timestamp()) if hasattr(ts, 'timestamp') else int(ts)
+    except Exception:
+        pass  # Table doesn't exist yet
     return None
 
 def delete_imported_tables():
-    """Delete all rows from the three imported measurement tables using SQL."""
-    print(f"Deleting all rows from imported tables in database '{INFLUX_DATABASE}'...")
-    for measurement, aliases in MEASUREMENTS.items():
-        for alias in aliases:
+    """Drop the imported measurement tables.
+    InfluxDB v3 (IOx) does not support SQL DELETE, so we use DROP TABLE.
+    Falls back to the v2 HTTP delete endpoint if DROP TABLE is also unsupported.
+    """
+    print(f"Dropping imported tables from database '{INFLUX_DATABASE}'...")
+    for table in MEASUREMENTS:
+        try:
+            client.query(f'DROP TABLE IF EXISTS "{table}"', language="sql")
+            print(f"  Dropped: {table}")
+        except Exception as e:
+            print(f"  DROP TABLE failed for {table} ({e}), trying HTTP delete...")
             try:
-                client.query(f'DELETE FROM "{alias}"', language="sql")
-                print(f"  Cleared: {alias}")
-            except Exception as e:
-                print(f"  Warning: could not clear {alias}: {e}")
-    print("All tables cleared.")
+                resp = requests.post(
+                    f"{INFLUX_URL}/api/v2/delete",
+                    headers={
+                        "Authorization": f"Token {INFLUX_TOKEN}",
+                        "Content-Type": "application/json"
+                    },
+                    json={
+                        "start": "1970-01-01T00:00:00Z",
+                        "stop":  "2100-01-01T00:00:00Z",
+                        "predicate": f'_measurement="{table}"'
+                    },
+                    params={"org": INFLUX_ORG, "bucket": INFLUX_DATABASE},
+                    timeout=30
+                )
+                if resp.ok:
+                    print(f"  Cleared via HTTP delete: {table}")
+                else:
+                    print(f"  HTTP delete also failed for {table}: {resp.status_code} {resp.text}")
+                    print(f"  You may need to manually delete '{table}' via the InfluxDB UI.")
+            except Exception as e2:
+                print(f"  HTTP delete error for {table}: {e2}")
+    print("Done.")
 
 def import_table(table_name, measurement, fields, skip_new=False):
     print(f"\n--- {table_name} -> {measurement} ---")
