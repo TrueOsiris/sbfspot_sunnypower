@@ -20,7 +20,7 @@ if not INFLUX_TOKEN:
     print("Example: INFLUX_TOKEN=apiv3_your_token_here")
     sys.exit(1)
 
-# InfluxDB v3 client: SQL queries & line protocol writes
+# InfluxDB v3 client
 client = InfluxDBClient3(
     host=INFLUX_URL,
     token=INFLUX_TOKEN,
@@ -31,7 +31,10 @@ client = InfluxDBClient3(
 def get_max_timestamp_in_influx(measurement):
     """Return the latest Unix timestamp already stored for this measurement, or None."""
     try:
-        result = client.query(f'SELECT max(time) AS max_time FROM "{measurement}"', language="sql")
+        # Limit the query to the last 14 days to avoid the 5000 Parquet file limit in InfluxDB 3 Core
+        query = f"SELECT max(time) AS max_time FROM \"{measurement}\" WHERE time >= now() - INTERVAL '14 days'"
+        
+        result = client.query(query, language="sql")
         if result and result.num_rows > 0:
             col = result.column("max_time")
             if col and len(col) > 0:
@@ -45,37 +48,30 @@ def get_max_timestamp_in_influx(measurement):
         return 9999999999 
     return None
 
-
 def import_table(table_name, measurement, fields, skip_new=False):
-    print(f"\n--- {table_name} -> {measurement} ---")
-
     max_timestamp = None
     if skip_new:
         max_timestamp = get_max_timestamp_in_influx(measurement)
-        if max_timestamp is not None:
-            readable = datetime.fromtimestamp(max_timestamp, tz=timezone.utc).isoformat()
-            print(f"  Latest existing record: {readable}")
-        else:
-            print(f"  No existing data found in InfluxDB for this table. Skipping.")
-            print(f"  (Use --full-reimport to do the first import.)")
-            return
+        if max_timestamp is None:
+            # Table doesn't exist at all yet
+            return 0
 
+    # Safely connect in read-only mode via URI
     conn = sqlite3.connect(f"file:{SQLITE_DB}?mode=ro", uri=True)
     conn.row_factory = sqlite3.Row
     cursor = conn.cursor()
-
+    
+    # Let SQLite handle the filtering
     if max_timestamp is not None:
         cursor.execute(f"SELECT * FROM {table_name} WHERE TimeStamp > ?", (max_timestamp,))
     else:
         cursor.execute(f"SELECT * FROM {table_name}")
-
+        
     rows = cursor.fetchall()
     conn.close()
 
-    print(f"  Records to import: {len(rows)}")
     if len(rows) == 0:
-        print(f"  Nothing new to import.")
-        return
+        return 0
 
     points = []
     for row in rows:
@@ -83,13 +79,16 @@ def import_table(table_name, measurement, fields, skip_new=False):
         timestamp = row_dict.get('TimeStamp')
         if not timestamp:
             continue
+            
         dt = datetime.fromtimestamp(timestamp, tz=timezone.utc)
         serial = str(row_dict.get('Serial', 'unknown'))
         point = Point(measurement).tag("serial", serial)
+        
         for field in fields:
             val = row_dict.get(field)
             if val is not None and isinstance(val, (int, float)):
                 point.field(field, float(val))
+                
         point.time(dt)
         points.append(point)
 
@@ -100,20 +99,15 @@ def import_table(table_name, measurement, fields, skip_new=False):
     if points:
         client.write(record=points)
 
-    print(f"  Done.")
+    # Print the specific summary for this table since data was moved
+    print(f"[{table_name} -> {measurement}] Imported {len(rows)} new records.")
+    return len(rows)
 
 if __name__ == "__main__":
     try:
         full_reimport = "--full-reimport" in sys.argv
-
-        if full_reimport:
-            print("=== FULL REIMPORT MODE ===")
-            print("Importing all rows from SQLite without filtering.\n")
-            skip_new = False
-        else:
-            print("=== INCREMENTAL MODE ===")
-            print("Only new records are imported. Tables with no existing InfluxDB data are skipped.\n")
-            skip_new = True
+        skip_new = not full_reimport
+        total_imported = 0
 
         spot_fields = [
             "Pdc1", "Pdc2", "Idc1", "Idc2", "Udc1", "Udc2",
@@ -121,18 +115,23 @@ if __name__ == "__main__":
             "Uac1", "Uac2", "Uac3", "EToday", "ETotal",
             "Frequency", "OperatingTime", "FeedInTime", "Temperature"
         ]
-        import_table("DayData",   "sbfspot_day",   ["TotalYield", "Power"],    skip_new=skip_new)
-        import_table("MonthData", "sbfspot_month", ["TotalYield", "DayYield"], skip_new=skip_new)
-        import_table("SpotData",  "sbfspot_spot",  spot_fields,               skip_new=skip_new)
+        
+        # We suppress the printing of the table names up front, it only prints if data is imported inside the function
+        total_imported += import_table("DayData",   "sbfspot_day",   ["TotalYield", "Power"],    skip_new=skip_new)
+        total_imported += import_table("MonthData", "sbfspot_month", ["TotalYield", "DayYield"], skip_new=skip_new)
+        total_imported += import_table("SpotData",  "sbfspot_spot",  spot_fields,               skip_new=skip_new)
 
-        print("\nCompleted successfully.")
-        print("\nUsage:")
-        print("  python backfill_history_to_influxdb.py                  # Incremental (new records only, skips empty tables)")
-        print("  python backfill_history_to_influxdb.py --full-reimport  # Import all SQLite rows (no delete/wipe)")
+        # Only print the final summary block if actual work was done across any table
+        if total_imported > 0:
+            print(f"Total new records backfilled across all tables: {total_imported}")
+            if not full_reimport:
+                print("\nUsage Help:")
+                print("  python backfill_history_to_influxdb.py                  # Incremental (default)")
+                print("  python backfill_history_to_influxdb.py --full-reimport  # Import all SQLite rows")
+
     except Exception as e:
         print(f"\nError: {e}")
         import traceback
         traceback.print_exc()
     finally:
-        #client.close()
         pass
