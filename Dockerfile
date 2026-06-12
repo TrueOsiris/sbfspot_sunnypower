@@ -5,7 +5,7 @@ LABEL org.opencontainers.image.authors="TrueOsiris"
 WORKDIR /app
 
 # Install dependencies using the system break flag
-RUN pip3 install --no-cache-dir --break-system-packages influxdb3-python
+RUN pip3 install --no-cache-dir --break-system-packages influxdb3-python pytz
 
 # Copy the script and entrypoint
 COPY src/ /app/src/

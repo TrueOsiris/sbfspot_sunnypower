@@ -57,15 +57,17 @@ def import_table(table_name, measurement, fields, skip_new=False):
             print(f"  (Use --full-reimport to do the first import.)")
             return
 
-    conn = sqlite3.connect(SQLITE_DB)
+    conn = sqlite3.connect(f"file:{SQLITE_DB}?mode=ro", uri=True)
     conn.row_factory = sqlite3.Row
     cursor = conn.cursor()
-    cursor.execute(f"SELECT * FROM {table_name}")
-    rows = cursor.fetchall()
-    conn.close()
 
     if max_timestamp is not None:
-        rows = [r for r in rows if r['TimeStamp'] > max_timestamp]
+        cursor.execute(f"SELECT * FROM {table_name} WHERE TimeStamp > ?", (max_timestamp,))
+    else:
+        cursor.execute(f"SELECT * FROM {table_name}")
+
+    rows = cursor.fetchall()
+    conn.close()
 
     print(f"  Records to import: {len(rows)}")
     if len(rows) == 0:
@@ -129,4 +131,5 @@ if __name__ == "__main__":
         import traceback
         traceback.print_exc()
     finally:
-        client.close()
+        #client.close()
+        pass
