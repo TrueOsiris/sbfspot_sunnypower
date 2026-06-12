@@ -3,10 +3,8 @@
 
 import os
 import sqlite3
-from influxdb_client import InfluxDBClient, Point
-from influxdb_client.client.write_api import SYNCHRONOUS
-from datetime import datetime
-import pytz
+from influxdb_client_3 import InfluxDBClient3, Point
+from datetime import datetime, timezone
 import sys
 
 # --- Configuration via Environment Variables ---
@@ -22,177 +20,138 @@ if not INFLUX_TOKEN:
     print("Example: INFLUX_TOKEN=apiv3_your_token_here")
     sys.exit(1)
 
-# Initialize Client
-client = InfluxDBClient(url=INFLUX_URL, token=INFLUX_TOKEN, org=INFLUX_ORG)
-write_api = client.write_api(write_options=SYNCHRONOUS)
-query_api = client.query_api()
+# InfluxDB v3 client: SQL queries & deletes, line protocol writes
+client = InfluxDBClient3(
+    host=INFLUX_URL,
+    token=INFLUX_TOKEN,
+    database=INFLUX_DATABASE,
+    org=INFLUX_ORG
+)
 
-MEASUREMENT_ALIASES = {
-    "sbfspot_day": ["sbfspot_day", "DayData"],
+# In InfluxDB v3, each measurement is stored as a table.
+# We check both import-assigned names and raw SQLite table names (legacy).
+MEASUREMENTS = {
+    "sbfspot_day":   ["sbfspot_day", "DayData"],
     "sbfspot_month": ["sbfspot_month", "MonthData"],
-    "sbfspot_spot": ["sbfspot_spot", "SpotData"],
+    "sbfspot_spot":  ["sbfspot_spot", "SpotData"],
 }
 
 def get_max_timestamp_in_influx(measurement):
-    """Query InfluxDB to find the maximum timestamp for a measurement."""
-    try:
-        aliases = MEASUREMENT_ALIASES.get(measurement, [measurement])
-        for alias in aliases:
-            query = f"""
-            from(bucket: "{INFLUX_DATABASE}")
-              |> range(start: 1970-01-01T00:00:00Z, stop: now())
-              |> filter(fn: (r) => r._measurement == "{alias}")
-              |> group(columns: ["_measurement"])
-              |> sort(columns: ["_time"], desc: true)
-              |> limit(n: 1)
-            """
-            result = query_api.query(org=INFLUX_ORG, query=query)
-
-            if result:
-                for table in result:
-                    for record in table.records:
-                        ts = record.get_time() or record.values.get("_time")
-                        if ts:
-                            if alias != measurement:
-                                print(f"Using legacy measurement name {alias} for {measurement}.")
+    """Return the latest Unix timestamp already stored for this measurement, or None."""
+    for alias in MEASUREMENTS.get(measurement, [measurement]):
+        try:
+            result = client.query(f'SELECT max(time) AS max_time FROM "{alias}"', language="sql")
+            if result and result.num_rows > 0:
+                col = result.column("max_time")
+                if col and len(col) > 0:
+                    ts = col[0].as_py()
+                    if ts is not None:
+                        if hasattr(ts, 'timestamp'):
                             return int(ts.timestamp())
-        return None
-    except Exception as e:
-        status = getattr(e, "status", None)
-        reason = getattr(e, "reason", "")
-        if status == 404 or "Not found" in str(e) or reason == "Not Found":
-            return None
-        print(f"Warning: Could not query max timestamp for {measurement}: {e}")
-        return None
+                        return int(ts)
+        except Exception:
+            pass  # Table doesn't exist yet, try next alias
+    return None
+
+def delete_imported_tables():
+    """Delete all rows from the three imported measurement tables using SQL."""
+    print(f"Deleting all rows from imported tables in database '{INFLUX_DATABASE}'...")
+    for measurement, aliases in MEASUREMENTS.items():
+        for alias in aliases:
+            try:
+                client.query(f'DELETE FROM "{alias}"', language="sql")
+                print(f"  Cleared: {alias}")
+            except Exception as e:
+                print(f"  Warning: could not clear {alias}: {e}")
+    print("All tables cleared.")
 
 def import_table(table_name, measurement, fields, skip_new=False):
-    print(f"--- Starting Migration: {table_name} -> {measurement} ---")
-    
-    # Only import new data if skip_new is True
+    print(f"\n--- {table_name} -> {measurement} ---")
+
     max_timestamp = None
     if skip_new:
         max_timestamp = get_max_timestamp_in_influx(measurement)
-        if max_timestamp:
-            print(f"Found existing data up to timestamp {max_timestamp}. Only importing newer records...")
-    
+        if max_timestamp is not None:
+            readable = datetime.fromtimestamp(max_timestamp, tz=timezone.utc).isoformat()
+            print(f"  Latest existing record: {readable}")
+        else:
+            print(f"  No existing data found in InfluxDB for this table. Skipping.")
+            print(f"  (Use --full-reimport to do the first import.)")
+            return
+
     conn = sqlite3.connect(SQLITE_DB)
     conn.row_factory = sqlite3.Row
     cursor = conn.cursor()
-    
     cursor.execute(f"SELECT * FROM {table_name}")
     rows = cursor.fetchall()
-    print(f"Found {len(rows)} records in {table_name}.")
-    
-    # Filter rows if we're doing incremental import
-    if max_timestamp:
+    conn.close()
+
+    if max_timestamp is not None:
         rows = [r for r in rows if r['TimeStamp'] > max_timestamp]
-        print(f"After filtering: {len(rows)} new records to import.")
-    
+
+    print(f"  Records to import: {len(rows)}")
     if len(rows) == 0:
-        print(f"No new data to import for {measurement}.")
-        conn.close()
+        print(f"  Nothing new to import.")
         return
-    
-    print(f"Importing {len(rows)} records...")
-    
+
     points = []
     for row in rows:
         row_dict = dict(row)
         timestamp = row_dict.get('TimeStamp')
         if not timestamp:
             continue
-        
-        # Convert SQLite Epoch to Python Datetime
-        dt = datetime.fromtimestamp(timestamp, pytz.UTC)
-        
-        # Use Serial as a TAG (indexed, constant)
+        dt = datetime.fromtimestamp(timestamp, tz=timezone.utc)
         serial = str(row_dict.get('Serial', 'unknown'))
-        
         point = Point(measurement).tag("serial", serial)
-        
-        # Add numeric fields (skipping strings like Status/GridRelay)
         for field in fields:
             val = row_dict.get(field)
             if val is not None and isinstance(val, (int, float)):
                 point.field(field, float(val))
-        
         point.time(dt)
         points.append(point)
-        
-        # Batch write in chunks of 1000 to keep memory low
-        if len(points) >= 1000:
-            write_api.write(bucket=INFLUX_DATABASE, record=points)
-            points = []
-            
-    if points:
-        write_api.write(bucket=INFLUX_DATABASE, record=points)
-    
-    conn.close()
-    print(f"Finished {table_name}.")
 
-def delete_imported_tables():
-    """Delete all rows from the imported measurements before a full reimport."""
-    try:
-        from influxdb_client.client.delete_api import DeleteApi
-        delete_api = DeleteApi(client)
-        deleted = []
-        for measurement in ("sbfspot_day", "sbfspot_month", "sbfspot_spot"):
-            for alias in MEASUREMENT_ALIASES.get(measurement, [measurement]):
-                delete_api.delete(
-                    org=INFLUX_ORG,
-                    bucket=INFLUX_DATABASE,
-                    start=datetime(1970, 1, 1, tzinfo=pytz.UTC),
-                    stop=datetime.now(pytz.UTC),
-                    predicate=f'_measurement="{alias}"'
-                )
-                deleted.append(alias)
-        print(f"Deleted all rows from imported tables/measurements: {', '.join(deleted)}")
-    except Exception as e:
-        print(f"Error deleting imported tables in database {INFLUX_DATABASE}: {e}")
+        if len(points) >= 1000:
+            client.write(record=points)
+            points = []
+
+    if points:
+        client.write(record=points)
+
+    print(f"  Done.")
 
 if __name__ == "__main__":
     try:
-        # Parse command-line arguments
         full_reimport = "--full-reimport" in sys.argv
         cleanup = "--cleanup" in sys.argv
-        skip_new = not full_reimport  # By default, only import new data
-        
-        if cleanup:
-            print("=== CLEANUP MODE: Removing all old data ===")
+
+        if cleanup or full_reimport:
+            mode = "CLEANUP" if cleanup else "FULL REIMPORT"
+            print(f"=== {mode}: Wiping imported tables before reimport ===")
             delete_imported_tables()
-            print("Cleanup complete. Now performing full reimport...\n")
-            skip_new = False
-        
-        if full_reimport:
-            print("=== FULL REIMPORT MODE: Replacing all data ===")
-            delete_imported_tables()
-            print("Old data deleted. Starting fresh import...\n")
+            print("\nReimporting all data...")
             skip_new = False
         else:
-            print("=== INCREMENTAL MODE: Only importing new data ===\n")
-        
-        # 1. DayData (5-min intervals)
-        import_table("DayData", "sbfspot_day", ["TotalYield", "Power"], skip_new=skip_new)
-        
-        # 2. MonthData (Daily/Monthly summaries)
-        import_table("MonthData", "sbfspot_month", ["TotalYield", "DayYield"], skip_new=skip_new)
-        
-        # 3. SpotData (The detailed granular data with phase voltage/current)
+            print("=== INCREMENTAL MODE ===")
+            print("Only new records are imported. Tables with no existing InfluxDB data are skipped.\n")
+            skip_new = True
+
         spot_fields = [
-            "Pdc1", "Pdc2", "Idc1", "Idc2", "Udc1", "Udc2", 
-            "Pac1", "Pac2", "Pac3", "Iac1", "Iac2", "Iac3", 
-            "Uac1", "Uac2", "Uac3", "EToday", "ETotal", 
+            "Pdc1", "Pdc2", "Idc1", "Idc2", "Udc1", "Udc2",
+            "Pac1", "Pac2", "Pac3", "Iac1", "Iac2", "Iac3",
+            "Uac1", "Uac2", "Uac3", "EToday", "ETotal",
             "Frequency", "OperatingTime", "FeedInTime", "Temperature"
         ]
-        import_table("SpotData", "sbfspot_spot", spot_fields, skip_new=skip_new)
-        
-        print("\nAll data import completed successfully.")
+        import_table("DayData",   "sbfspot_day",   ["TotalYield", "Power"],    skip_new=skip_new)
+        import_table("MonthData", "sbfspot_month", ["TotalYield", "DayYield"], skip_new=skip_new)
+        import_table("SpotData",  "sbfspot_spot",  spot_fields,               skip_new=skip_new)
+
+        print("\nCompleted successfully.")
         print("\nUsage:")
-        print("  python backfill_history_to_influxdb.py           # Incremental (new data only)")
-        print("  python backfill_history_to_influxdb.py --full-reimport  # Full reimport (delete & reimport)")
-        print("  python backfill_history_to_influxdb.py --cleanup        # Cleanup & full reimport")
+        print("  python backfill_history_to_influxdb.py                  # Incremental (new records only, skips empty tables)")
+        print("  python backfill_history_to_influxdb.py --full-reimport  # Wipe tables & reimport all")
+        print("  python backfill_history_to_influxdb.py --cleanup        # Same as --full-reimport")
     except Exception as e:
-        print(f"An error occurred: {e}")
+        print(f"\nError: {e}")
         import traceback
         traceback.print_exc()
     finally:
