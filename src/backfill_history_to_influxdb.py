@@ -130,24 +130,25 @@ def import_table(table_name, measurement, fields, skip_new=False):
     conn.close()
     print(f"Finished {table_name}.")
 
-def delete_measurement(measurement):
-    """Delete all data for a measurement (cleanup)."""
+def delete_imported_tables():
+    """Delete all rows from the imported measurements before a full reimport."""
     try:
         from influxdb_client.client.delete_api import DeleteApi
         delete_api = DeleteApi(client)
         deleted = []
-        for alias in MEASUREMENT_ALIASES.get(measurement, [measurement]):
-            delete_api.delete(
-                org=INFLUX_ORG,
-                bucket=INFLUX_DATABASE,
-                start_time=datetime(1970, 1, 1, tzinfo=pytz.UTC),
-                stop_time=datetime.now(pytz.UTC),
-                predicate=f'_measurement="{alias}"'
-            )
-            deleted.append(alias)
-        print(f"Deleted all data for measurement(s): {', '.join(deleted)}")
+        for measurement in ("sbfspot_day", "sbfspot_month", "sbfspot_spot"):
+            for alias in MEASUREMENT_ALIASES.get(measurement, [measurement]):
+                delete_api.delete(
+                    org=INFLUX_ORG,
+                    bucket=INFLUX_DATABASE,
+                    start=datetime(1970, 1, 1, tzinfo=pytz.UTC),
+                    stop=datetime.now(pytz.UTC),
+                    predicate=f'_measurement="{alias}"'
+                )
+                deleted.append(alias)
+        print(f"Deleted all rows from imported tables/measurements: {', '.join(deleted)}")
     except Exception as e:
-        print(f"Error deleting {measurement}: {e}")
+        print(f"Error deleting imported tables in database {INFLUX_DATABASE}: {e}")
 
 if __name__ == "__main__":
     try:
@@ -158,17 +159,13 @@ if __name__ == "__main__":
         
         if cleanup:
             print("=== CLEANUP MODE: Removing all old data ===")
-            delete_measurement("sbfspot_day")
-            delete_measurement("sbfspot_month")
-            delete_measurement("sbfspot_spot")
+            delete_imported_tables()
             print("Cleanup complete. Now performing full reimport...\n")
             skip_new = False
         
         if full_reimport:
             print("=== FULL REIMPORT MODE: Replacing all data ===")
-            delete_measurement("sbfspot_day")
-            delete_measurement("sbfspot_month")
-            delete_measurement("sbfspot_spot")
+            delete_imported_tables()
             print("Old data deleted. Starting fresh import...\n")
             skip_new = False
         else:

@@ -68,6 +68,8 @@ docker compose run --rm --entrypoint python3 sbfspot_sp /app/src/backfill_histor
 docker compose run --rm --entrypoint python3 sbfspot_sp /app/src/backfill_history_to_influxdb.py --cleanup
 ```
 
+`INFLUX_DATABASE` is the InfluxDB v3 database name. The cleanup/full-reimport commands wipe the imported tables/measurements (`DayData` / `MonthData` / `SpotData`, plus the `sbfspot_*` aliases) before repopulating them; they do not touch unrelated tables in the same database.
+
 ## 3. Configuration Parameters
 
 The container's behavior is fully controlled via environment variables:
@@ -78,7 +80,7 @@ The container's behavior is fully controlled via environment variables:
 * `INFLUX_URL`: The full HTTP/HTTPS URL and port to your InfluxDB v3 server.
 * `INFLUX_TOKEN`: **[MANDATORY]** Your InfluxDB v3 API authentication token (must start with `apiv3_`). Generate this in your InfluxDB console.
 * `INFLUX_ORG`: Your InfluxDB organization name (Default: `defaultorg`).
-* `INFLUX_DATABASE`: The target bucket or database name for the solar metrics.
+* `INFLUX_DATABASE`: The target InfluxDB v3 database name for the solar metrics.
 
 ## 4. How it Works
 
